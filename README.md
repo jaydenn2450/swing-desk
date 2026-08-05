@@ -1,4 +1,7 @@
 # Swing Desk — internal daily swing scanner (v1.2, production)
+<img width="2048" height="953" alt="Screenshot 2026-08-04 190123" src="https://github.com/user-attachments/assets/0feed741-be36-43b6-b470-0b5c9a629cf4" />
+<img width="2017" height="930" alt="image" src="https://github.com/user-attachments/assets/fdb7f72b-a02e-4489-98d4-b61c7102f2c4" />
+> Daily desk view: top-3 focus ideas with confluence strip, ranked scan, and sector rotation. Live options intel & GEX ladders on the FLOW tab.
 
 > **Read [REVIEW.md](REVIEW.md) before trading from this.** It documents the
 > pre-production adversarial review, what was fixed, and the three limitations
