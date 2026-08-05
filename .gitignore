@@ -1,0 +1,22 @@
+# Personal / cached / regenerable
+data/
+__pycache__/
+*.pyc
+.vscode/
+
+# Generated from *_template.html (rebuild via `python engine.py html`)
+dashboard.html
+chart.html
+
+# Old iterations
+dashboard_v01.html
+dashboard_v01_template.html
+
+# Local overrides — keep watchlist private
+watchlist.txt
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/

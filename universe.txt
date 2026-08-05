@@ -1,0 +1,81 @@
+# Scan universe — one ticker per line. Lines starting with # are ignored.
+# Demo set: ~70 liquid US names across sectors. Expand/replace as you like.
+# Mega tech
+AAPL
+MSFT
+NVDA
+AMZN
+GOOGL
+META
+TSLA
+AVGO
+# Semis / hardware
+AMD
+QCOM
+MU
+ANET
+SMCI
+VRT
+ARM
+MRVL
+# Software / internet
+CRM
+NOW
+ORCL
+PLTR
+SNOW
+CRWD
+PANW
+NET
+DDOG
+SHOP
+UBER
+ABNB
+NFLX
+SPOT
+APP
+# Financials
+JPM
+GS
+MS
+BAC
+V
+MA
+AXP
+COIN
+HOOD
+# Healthcare
+LLY
+UNH
+MRK
+ABBV
+VRTX
+ISRG
+# Consumer
+COST
+WMT
+HD
+NKE
+SBUX
+MCD
+LULU
+CMG
+DKNG
+# Industrials / energy / materials
+CAT
+DE
+GE
+BA
+ETN
+PH
+URI
+XOM
+CVX
+FCX
+OXY
+VST
+CEG
+# Comm / media
+DIS
+TTD
+RBLX

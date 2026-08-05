@@ -1,0 +1,7 @@
+# Macro events to watch — shown on the dashboard.
+# Format: YYYY-MM-DD | label
+# Ask Claude to refresh this weekly (web search: "economic calendar this week").
+# Dates below are PLACEHOLDERS — verify before relying on them.
+2026-08-07 | NFP jobs report (verify date)
+2026-08-12 | CPI print (verify date)
+2026-09-16 | FOMC decision (verify date)
