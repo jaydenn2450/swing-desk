@@ -19,7 +19,7 @@ Looked-up names are merged into data/report.json, so they persist across
 `engine.py html` rebuilds and page reloads.
 """
 
-import json, os, sys, threading, urllib.parse, datetime
+import json, os, sys, threading, time, urllib.parse, datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 import engine
@@ -29,8 +29,14 @@ DATA = os.path.join(ROOT, "data")
 REPORT = os.path.join(DATA, "report.json")
 
 _lock = threading.Lock()
+# Earnings and rotation cached at server start; refreshed via TTL below so a
+# long-running server doesn't drift into using stale calendar data (bug fix
+# for pre-prod review HIGH-H3).
+EARNINGS_TTL_SECONDS = 6 * 3600
+ROTATION_TTL_SECONDS = 12 * 3600
 _state = {"spy": None, "earnings": None, "recent_earnings": None,
-          "rotation": None, "sectors": None}
+          "earnings_ts": 0.0,
+          "rotation": None, "sectors": None, "rotation_ts": 0.0}
 
 
 def _load_report():
@@ -39,25 +45,33 @@ def _load_report():
 
 
 def _boot():
-    """Warm the shared context a lookup needs (SPY, earnings, rotation)."""
+    """Warm the shared context a lookup needs (SPY, earnings, rotation).
+    Earnings + rotation age out via TTL below so a long-running server
+    doesn't ossify on Monday's data (pre-prod review HIGH-H3)."""
+    now = time.time()
     if _state["spy"] is None:
         print("  warming: SPY history ...")
         _state["spy"] = [b["c"] for b in engine.fetch_history("SPY")]
-    if _state["earnings"] is None:
-        print("  warming: earnings calendar ...")
+    if _state["earnings"] is None or (now - _state["earnings_ts"]) > EARNINGS_TTL_SECONDS:
+        _state["earnings_ts"] = now
+        print("  warming: earnings calendar ..." if _state["earnings"] is None
+              else "  refreshing: earnings calendar (TTL expired) ...")
         try:
             up, _wk, rec = engine.fetch_earnings_map()
             _state["earnings"], _state["recent_earnings"] = up, rec
         except Exception:
-            _state["earnings"], _state["recent_earnings"] = {}, {}
-    if _state["rotation"] is None:
+            if _state["earnings"] is None:
+                _state["earnings"], _state["recent_earnings"] = {}, {}
+    if _state["rotation"] is None or (now - _state["rotation_ts"]) > ROTATION_TTL_SECONDS:
+        _state["rotation_ts"] = now
         try:
             rep = _load_report()
             _state["rotation"] = rep.get("rotation")
             _state["sectors"] = {t: (r or {}).get("sector")
                                  for t, r in (rep.get("results") or {}).items()}
         except Exception:
-            _state["rotation"], _state["sectors"] = None, {}
+            if _state["rotation"] is None:
+                _state["rotation"], _state["sectors"] = None, {}
 
 
 def _sector_for(sym):
@@ -119,6 +133,24 @@ def lookup(sym):
     with _lock:
         try:
             rep = _load_report()
+            # Apply portfolio-level risk-off halving (pre-prod review CRIT-C1)
+            # so searched names show the SAME sizing rules as batch top-3.
+            # Without this, a HALF_SIZE market with a searched card looks
+            # full-size to the trader and 2x-oversizes real positions.
+            risk_off = (rep.get("market") or {}).get("risk_off")
+            if risk_off:
+                engine.apply_risk_off_to_result(r, risk_off)
+            # Apply sector cap consistency (pre-prod review HIGH-H1): if the
+            # searched name would be the 3rd+ in its sector when combined
+            # with the current ranked list, flag it.
+            if r.get("sector") and r.get("risk"):
+                other_sec_count = sum(
+                    1 for t, rr in (rep.get("results") or {}).items()
+                    if t != sym and (rr or {}).get("sector") == r["sector"]
+                    and (rr or {}).get("gates_passed") and (rr or {}).get("risk")
+                    and not (rr["risk"].get("sector_capped") is True))
+                if other_sec_count >= engine.SECTOR_MAX_POSITIONS:
+                    r["risk"]["sector_capped"] = True
             rep.setdefault("results", {})[sym] = r
             if opts: rep.setdefault("options", {})[sym] = opts
             rep.setdefault("charts", {})[sym] = chart

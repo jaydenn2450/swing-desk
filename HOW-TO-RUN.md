@@ -164,7 +164,11 @@ current regardless of when you run.
 | `python engine.py watch add NVDA 178.50` | Same, recording your entry price so drawdown-from-entry is tracked |
 | `python engine.py watch remove NVDA` | Remove from the file watchlist |
 | `python engine.py export-holdings` | Write `holdings.csv` from the watchlist for the portfolio stress test |
-| `python backtest.py` | Re-run the score-validation backtest (~1 min) |
+| `python backtest.py` | Legacy backtest — validates a *simplified* composite (kept for parity with older reports) |
+| `python backtest_wf.py` | Walk-forward on the **real** `engine.analyze` scorer + Deflated Sharpe + PBO + sector-neutral / TR06-filtered variants (~90s after cache warmup) |
+| `python backtest_phaseB.py` | Portfolio-level validation of Phase B additions: top-8 equal-weight, 21d hold, four variants (base / sector-capped / regime-gated / both) with Sharpe / MaxDD / hit-rate + a risk-off firing log against known stress dates (~100s) |
+| `python phaseC_regime_builder.py` | Rebuilds `data/regime_lookup.json` — historical (VIX × HY-OAS × SPX) → Q5 forward-21d edge lookup used by the DESK regime chip. Re-run occasionally (monthly?) so the lookup reflects the most recent 3y of walk-forward data (~100s) |
+| `python backtest_pead.py` | Validates any candidate PEAD sub-scorer against the base composite on the POST_EVENT_DRIFT subset. If a new scorer's Q5-Q1 spread beats composite's +3.06%, it earns replacement; otherwise composite stays as the PEAD ranker |
 
 ---
 
@@ -202,7 +206,26 @@ To clear browser adds: open the Watchlist tab and click ✕ on each, or run
 | `macro.txt` | CPI/FOMC/NFP dates shown on the dashboard — **ask Claude to refresh weekly**; the dates in there now are placeholders |
 
 Config knobs are at the top of `engine.py`: `ACCOUNT_SIZE`, `RISK_BUDGET_PCT`,
-`MIN_DOLLAR_VOL`, `EARNINGS_BLACKOUT_DAYS`, `MIN_REWARD_RISK`, `MAX_POSITION_PCT`.
+`MIN_DOLLAR_VOL`, `EARNINGS_BLACKOUT_DAYS`, `MIN_REWARD_RISK`, `MAX_POSITION_PCT`,
+`SECTOR_MAX_POSITIONS` (max ranked names per sector before demotion),
+`FRED_KEY_FILE` (path to your FRED API key for the HY-OAS credit-spread veto).
+
+### Portfolio-level risk-off gate (Phase B)
+`data/fred_api_key.txt` holds your FRED API key (get one free at
+fredaccount.stlouisfed.org/apikeys). Engine pulls HY OAS (BAMLH0A0HYM2) each
+scan and combines with VIX into a risk-off tier: **NORMAL** (nothing) /
+**HALF_SIZE** (banner + every card's sizing halved) / **NO_ADDS** (banner +
+sizing zeroed). Triggers: HY OAS above 60d high or +40bps in 20d, or VIX > 25,
+promote to HALF_SIZE; HY OAS at 1y high **and** VIX in stress zone promote to
+NO_ADDS. The HY CREDIT SPREAD panel on the MARKET ENV tab shows the raw level
+and trigger detail.
+
+### Sector cap
+`SECTOR_MAX_POSITIONS = 2` — after the primary composite ranking, the 3rd+
+name in any sector is marked `sector_capped` and demoted below un-capped
+alternatives. Rank rows show a `↓SC` badge; big cards show `↓ SEC CAP` on the
+Size line. This bakes in the Phase A walk-forward finding that sector-neutral
+ranking gives ~2× the Sharpe.
 
 ---
 

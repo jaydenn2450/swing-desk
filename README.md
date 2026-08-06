@@ -4,10 +4,10 @@
 > Daily desk view: top-3 focus ideas with confluence strip, ranked scan, and sector rotation. Live options intel & GEX ladders on the FLOW tab.
 
 > **Read [REVIEW.md](REVIEW.md) before trading from this.** It documents the
-> pre-production adversarial review, what was fixed, and the three limitations
-> you must trade around (the backtest doesn't validate the shipped scorer;
-> option-flow side-inference is inferred not observed; feeds can disagree by a
-> full session).
+> pre-production adversarial review, what was fixed, and the limitations you
+> must trade around (option-flow side-inference is inferred not observed;
+> feeds can disagree by a full session). The walk-forward gap flagged in the
+> original review is now closed — see `backtest_wf.py` and REVIEW.md §4c.
 
 **v1.2 — hardening pass after adversarial review**
 - **Event-bar detection.** Any gap ≥3% or move ≥5% in the last 10 sessions is
@@ -198,22 +198,35 @@ regime banner, macro chips, rotation quadrant boxes (daily/weekly toggle),
 top-3 focus cards, signal-scan browser with recency chips, ranked table
 (click row → detail card), watchlist health with thesis text, earnings week.
 
-## Backtest (data/backtest_results.json)
+## Backtest
 
-Walk-forward sanity check, 3y, weekly sampling, forward 21d excess vs SPY:
+Two harnesses ship. Prefer `backtest_wf.py` for anything that matters — it
+calls the real scorer.
 
-| bucket | mean excess 21d | hit rate |
-|---|---|---|
-| Q1 (worst scores) | +0.72% | 48.2% |
-| Q3 | +1.45% | 50.8% |
-| Q5 (best scores) | **+3.94%** | 54.7% |
-| regime gate PASS | +2.27% | 52.2% |
-| regime gate FAIL | +0.92% | 48.9% |
+### `backtest_wf.py` — walk-forward on the real `engine.analyze` (data/backtest_wf.json)
 
-Monotonic — the composite orders names correctly. **Caveats:** survivorship-
-biased universe (today's list run backwards), no costs, overlapping windows.
-Treat as relative ranking evidence, not expected returns. Rerun:
-`python backtest.py`.
+3y × 147 names, weekly PIT slicing, 5bps round-trip cost, forward 21d excess
+vs SPY:
+
+| Variant | Q5-Q1 | Sharpe | DSR | PBO |
+|---|---|---|---|---|
+| base | +1.30% | 0.124 | 0.642 | 0.080 |
+| **sector-neutral** | **+1.44%** | **0.229** | **0.817** | 0.170 |
+| earnings-filtered | +1.29% | 0.125 | 0.650 | 0.182 |
+| both | +1.42% | 0.221 | 0.794 | 0.104 |
+
+Q1→Q5 monotonic across all horizons (1/3/5/10/21d), decay curve monotonic
+through 21d. PBO < 0.2 across variants means the composite isn't noise-fit.
+The sector-neutral lift is the real actionable finding — see REVIEW.md §4c.
+Rerun: `python backtest_wf.py` (~90s after earnings-history cache warm-up).
+
+### `backtest.py` — legacy simplified composite (data/backtest_results.json)
+
+Kept for historical comparison; it recomputes a vectorized approximation of
+the scorer (missing structure/participation/gates) and previously reported
+Q5 +3.94%/21d gross. The walk-forward above shows the real scorer nets
+roughly half that after costs, which is the whole reason the walk-forward
+harness now exists.
 
 ## Known limitations / next up
 

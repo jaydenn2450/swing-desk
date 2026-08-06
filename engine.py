@@ -72,6 +72,22 @@ SHORT_ETFS = {"SH": "S&P -1x", "SDS": "S&P -2x", "SPXU": "S&P -3x", "PSQ": "NQ -
 MARKET_EXTRA = ["^VIX9D", "^VIX3M", "CL=F", "USO", "OIH"]
 CHART_BARS = 504          # daily bars embedded per name for the chart tab (2y, enables weekly view)
 
+# FRED credit-spread pull (spec MK07). Series BAMLH0A0HYM2 = ICE BofA US High
+# Yield OAS -- the best non-price veto per the spec. Cache daily, treat as the
+# stress indicator that outranks VIX (VIX is options positioning; HY OAS is
+# credit demanding compensation for actual default risk).
+FRED_KEY_FILE = "data/fred_api_key.txt"
+HY_OAS_SERIES = "BAMLH0A0HYM2"
+HY_OAS_CACHE = "data/hy_oas_cache.json"
+SECTOR_MAX_POSITIONS = 2  # after ranking, demote the 3rd+ name per sector
+
+# Phase C regime multiplier: bucket the current regime, look up historical
+# top-quintile edge from data/regime_lookup.json (built offline by
+# phaseC_regime_builder.py). Keep bucket defs in sync with that builder.
+REGIME_LOOKUP_FILE = "data/regime_lookup.json"
+VIX_BUCKETS = [("LOW", 0, 20), ("MID", 20, 27), ("HI", 27, 999)]
+HY_PCTILE_BUCKETS = [("CALM", 0, 30), ("NORMAL", 30, 70), ("WIDE", 70, 101)]
+
 # ---------------------------------------------------------------- data layer
 
 def _get(url, timeout=25, tries=2):
@@ -105,6 +121,226 @@ def fetch_history(sym, rng="2y"):
             "v": q["volume"][i] or 0,
         })
     return bars
+
+def _read_fred_key():
+    p = os.path.join(ROOT, FRED_KEY_FILE)
+    if not os.path.exists(p):
+        return None
+    k = open(p, encoding="utf-8").read().strip()
+    return k or None
+
+
+def fetch_hy_oas():
+    """FRED BAMLH0A0HYM2 (US HY OAS, daily bps). Cached daily to disk.
+    Returns dict with current level, 60d high, 20d change, 1y percentile,
+    spark, and a 'read' string, or None if the key is missing / fetch fails.
+    HY OAS is the spec's MK07 risk gate: credit-market compensation demanded
+    for default risk, which historically leads equity drawdowns."""
+    cache_p = os.path.join(ROOT, HY_OAS_CACHE)
+    today = datetime.date.today().isoformat()
+    if os.path.exists(cache_p):
+        try:
+            c = json.load(open(cache_p, encoding="utf-8"))
+            if c.get("as_of") == today:
+                return c
+        except Exception:
+            pass
+    key = _read_fred_key()
+    if not key:
+        return None
+    url = (f"https://api.stlouisfed.org/fred/series/observations?series_id={HY_OAS_SERIES}"
+           f"&api_key={key}&file_type=json&observation_start=2023-01-01&sort_order=asc")
+    try:
+        j = json.loads(_get(url))
+    except Exception as e:
+        print(f"! FRED fetch failed: {str(e)[:120]}")
+        return None
+    obs = j.get("observations", [])
+    if not obs:
+        return None
+    series = [(o["date"], float(o["value"])) for o in obs if o["value"] not in (".", "", None)]
+    if len(series) < 60:
+        return None
+    dates = [d for d, _ in series]
+    vals = [v for _, v in series]
+    lvl = vals[-1]
+    prev = vals[-21] if len(vals) >= 21 else vals[0]
+    hi60 = max(vals[-60:])
+    yr = vals[-252:] if len(vals) >= 252 else vals
+    pctile = round(100 * sum(1 for x in yr if x <= lvl) / len(yr))
+    hi_1y = max(yr)
+    delta_20d_bps = round((lvl - prev) * 100)
+    # Simple regime read from level + trend + percentile.
+    if lvl >= hi_1y * 0.995:
+        read = "STRESS — HY OAS at a 1y high; credit markets are demanding real risk compensation."
+    elif lvl > hi60:
+        read = "WIDENING — HY OAS broke its 60d high; equity longs should tighten stops."
+    elif delta_20d_bps >= 40:
+        read = "WIDENING — HY OAS +{}bps in 20d; risk-off building even if levels aren't extreme.".format(delta_20d_bps)
+    elif pctile <= 15:
+        read = "COMPLACENT — HY OAS in the bottom 15% of 1y range; credit is calm, longs OK."
+    else:
+        read = f"NORMAL — HY OAS at the {pctile}th %ile of 1y; no credit-market veto."
+    out = {
+        "as_of": today, "series": HY_OAS_SERIES, "last_obs": dates[-1],
+        "level_bps": round(lvl * 100), "level": round(lvl, 2),
+        "hi_60d_bps": round(hi60 * 100), "hi_1y_bps": round(hi_1y * 100),
+        "delta_20d_bps": delta_20d_bps, "pctile_1y": pctile,
+        "spark": [round(x, 2) for x in vals[-90:]],
+        "above_60d_hi": lvl > hi60,
+        "at_1y_hi": lvl >= hi_1y * 0.995,
+        "read": read,
+    }
+    os.makedirs(os.path.dirname(cache_p), exist_ok=True)
+    json.dump(out, open(cache_p, "w", encoding="utf-8"), indent=2)
+    return out
+
+
+def apply_risk_off_to_result(r, risk_off):
+    """Halve (HALF_SIZE) or zero (NO_ADDS) the sizing on a single analyze()
+    result. Idempotent: skips if size_mult already applied. Must be called
+    from BOTH cmd_scan (batch scan) and serve.lookup (search) so the desk's
+    sizing rules apply consistently regardless of how the trader lands on a
+    card. Bug fix for pre-prod review CRIT-C1."""
+    if not risk_off or risk_off.get("size_mult", 1.0) >= 1.0:
+        return
+    rk = r.get("risk")
+    if not rk:
+        return
+    if rk.get("size_mult") is not None:      # already applied (e.g., html rebuild)
+        return
+    mult = risk_off["size_mult"]
+    rk["size_mult"] = mult
+    rk["size_orig_pct"] = rk.get("pct_of_account")
+    rk["size_orig_shares"] = rk.get("shares_at_risk_budget")
+    if rk.get("shares_at_risk_budget") is not None:
+        rk["shares_at_risk_budget"] = int((rk["shares_at_risk_budget"] or 0) * mult)
+    if rk.get("notional") is not None:
+        rk["notional"] = round((rk["notional"] or 0) * mult)
+    if rk.get("pct_of_account") is not None:
+        rk["pct_of_account"] = round((rk["pct_of_account"] or 0) * mult, 1)
+    rk["risk_off_tier"] = risk_off.get("tier")
+
+
+def compute_risk_off(vix_last, hy_oas):
+    """Combine VIX + HY OAS into a portfolio-level risk-off tier.
+    Rules deliberately conservative — the goal is to catch a regime break
+    early, not to smooth every wobble:
+      NO_ADDS   : HY OAS at 1y high AND VIX > 30 (or either at true extreme)
+      HALF_SIZE : HY OAS above 60d high, or VIX 25-30, or HY OAS 20d +>=40bps
+      NORMAL    : otherwise
+    Returns dict with tier, size_mult, banner text, and the specific triggers."""
+    triggers = []
+    if hy_oas:
+        if hy_oas["at_1y_hi"]:
+            triggers.append(("HY_OAS_1Y_HIGH", f"HY OAS at 1y high ({hy_oas['level_bps']}bps)"))
+        elif hy_oas["above_60d_hi"]:
+            triggers.append(("HY_OAS_60D_HIGH", f"HY OAS above 60d high ({hy_oas['level_bps']}bps > {hy_oas['hi_60d_bps']})"))
+        elif hy_oas["delta_20d_bps"] >= 40:
+            triggers.append(("HY_OAS_WIDENING", f"HY OAS +{hy_oas['delta_20d_bps']}bps in 20d"))
+    if vix_last is not None:
+        if vix_last > 30:
+            triggers.append(("VIX_PANIC", f"VIX {round(vix_last,1)} > 30"))
+        elif vix_last > 25:
+            triggers.append(("VIX_STRESS", f"VIX {round(vix_last,1)} > 25"))
+    tags = {t for t, _ in triggers}
+    if ("HY_OAS_1Y_HIGH" in tags and "VIX_PANIC" in tags) or \
+       ("HY_OAS_1Y_HIGH" in tags and "VIX_STRESS" in tags):
+        tier, mult = "NO_ADDS", 0.0
+    elif ("HY_OAS_60D_HIGH" in tags or "HY_OAS_1Y_HIGH" in tags or
+          "HY_OAS_WIDENING" in tags or "VIX_STRESS" in tags or "VIX_PANIC" in tags):
+        tier, mult = "HALF_SIZE", 0.5
+    else:
+        tier, mult = "NORMAL", 1.0
+    if tier == "NO_ADDS":
+        banner = "RISK-OFF · NO NEW ADDS — " + " · ".join(t for _, t in triggers)
+    elif tier == "HALF_SIZE":
+        banner = "RISK-OFF · HALF SIZE — " + " · ".join(t for _, t in triggers)
+    else:
+        banner = None
+    return {"tier": tier, "size_mult": mult, "triggers": [t for _, t in triggers],
+            "banner": banner}
+
+
+def _bucket_name(value, buckets, default):
+    if value is None:
+        return default
+    for name, lo, hi in buckets:
+        if lo <= value < hi:
+            return name
+    return buckets[-1][0]
+
+
+def load_regime_lookup():
+    p = os.path.join(ROOT, REGIME_LOOKUP_FILE)
+    if not os.path.exists(p):
+        return None
+    try:
+        return json.load(open(p, encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def current_regime_edge(vix_last, hy_oas, spy_above_200d, spy_200d_rising):
+    """Look up the historical top-quintile edge for the current regime cell.
+    Falls back to marginal (single-dim) averages when the 3-D cell is thin.
+    Returns dict with mean_x21_pct, hit_pct, n, edge_mult, source, bucket_label
+    -- or None if the lookup file doesn't exist yet."""
+    lut = load_regime_lookup()
+    if not lut:
+        return None
+    vb = _bucket_name(vix_last, VIX_BUCKETS, "MID")
+    hb = _bucket_name(hy_oas["pctile_1y"] if hy_oas else None, HY_PCTILE_BUCKETS, "NORMAL")
+    sb = "UP" if (spy_above_200d and spy_200d_rising) else "DOWN"
+    key = f"{vb}|{hb}|{sb}"
+    baseline = lut.get("baseline", {})
+    baseline_mean = baseline.get("mean_x21_pct", 0)
+    min_n = lut.get("min_bucket_n", 20)
+    cell = (lut.get("buckets") or {}).get(key)
+    source = "3d_bucket"
+    if not cell or cell.get("n", 0) < min_n:
+        # Marginal fallback: blend the three single-dim edges by weighted mean.
+        marginals = lut.get("marginals") or {}
+        parts = []
+        for dim, name in (("vix", vb), ("hy", hb), ("spx", sb)):
+            m = marginals.get(f"{dim}:{name}")
+            if m:
+                parts.append(m)
+        if not parts:
+            return None
+        mean_x = sum(p["mean_x21_pct"] * p["n"] for p in parts) / sum(p["n"] for p in parts)
+        hit = sum(p["hit_pct"] * p["n"] for p in parts) / sum(p["n"] for p in parts)
+        cell = {"mean_x21_pct": round(mean_x, 3), "hit_pct": round(hit, 1),
+                "n": min(p["n"] for p in parts),
+                "edge_mult": round(mean_x / baseline_mean, 2) if baseline_mean else None}
+        source = "marginal_blend"
+    return {
+        "bucket_label": f"{vb} VIX · {hb} HY · {sb} SPX",
+        "vix_bucket": vb, "hy_bucket": hb, "spx_bucket": sb,
+        "mean_x21_pct": cell["mean_x21_pct"],
+        "hit_pct": cell["hit_pct"],
+        "n": cell["n"],
+        "edge_mult": cell.get("edge_mult"),
+        "baseline_mean_x21_pct": baseline_mean,
+        "baseline_hit_pct": baseline.get("hit_pct"),
+        "source": source,
+        "read": _regime_read(cell.get("edge_mult"), cell.get("mean_x21_pct")),
+    }
+
+
+def _regime_read(mult, mean_x):
+    if mult is None or mean_x is None:
+        return "regime lookup unavailable"
+    if mean_x < 0:
+        return "REGIME UNFAVORABLE — top-quintile historically LOSES here; stand aside or trade tiny."
+    if mult >= 2.0:
+        return f"REGIME FAVORABLE — top-quintile historically {mult}× baseline. Model works best here."
+    if mult >= 1.3:
+        return f"REGIME SUPPORTIVE — top-quintile {mult}× baseline. Reasonable to press."
+    if mult >= 0.7:
+        return f"REGIME NEUTRAL — top-quintile {mult}× baseline. Normal size."
+    return f"REGIME WEAK — top-quintile only {mult}× baseline. Size down."
+
 
 def build_universe():
     """Broad-market feed: yfinance screener, mcap>AUTO_MIN_MCAP, tagged by sector.
@@ -1000,6 +1236,13 @@ def analyze(sym, bars, spy_closes, sector=None, earnings_date=None, recent_repor
     sc["composite"] = round(sc["trend"] * .25 + sc["relative_strength"] * .25
                             + sc["participation"] * .20 + sc["structure"] * .15
                             + sc["momentum"] * .10 + sc["volatility"] * .05, 1)
+    # Note: an early Phase C draft added a hand-tuned PEAD sub-score for
+    # POST_EVENT_DRIFT names, but backtest_pead.py showed it was ANTI-predictive
+    # (Q5-Q1 = -5.13%) — the sweet-spot assumptions (3-8% moves, days 4-15)
+    # were wrong; the big/fresh shocks the design penalized were the ones
+    # that actually continue. The base composite ranks PEAD names monotonically
+    # (Q5-Q1 = +3.06% on the same subset), so we use composite for PEAD too
+    # and group them into their own UI section for trader awareness.
     out["scores"] = {k: round(v, 1) for k, v in sc.items()}
 
     # ---- risk outputs: measured-move target + shelf-aware stop
@@ -1019,19 +1262,34 @@ def analyze(sym, bars, spy_closes, sector=None, earnings_date=None, recent_repor
         t2 = round(mm, 2) if mm > target * 1.01 else (round(max(candidates), 2) if candidates else None)
         if t2 is not None and t2 <= target * 1.01: t2 = None
         rr = round((target - entry) / rps, 2) if rps > 0 else None
-        shares = int((ACCOUNT_SIZE * RISK_BUDGET_PCT / 100) / rps) if rps > 0 else 0
-        notional = shares * entry
+        shares_risk = int((ACCOUNT_SIZE * RISK_BUDGET_PCT / 100) / rps) if rps > 0 else 0
+        notional_risk = shares_risk * entry
         # RK04: the spec requires >= 2:1. Flag rather than silently present sub-1R ideas.
         rr_flag = None
         if rr is not None:
             if rr < 1.0: rr_flag = "POOR"
             elif rr < MIN_REWARD_RISK: rr_flag = "BELOW_SPEC"
+        # Actually enforce MAX_POSITION_PCT (pre-prod wide-audit HIGH-P1).
+        # Previously size_capped was a flag only; the shares number displayed
+        # to the trader could still represent > MAX_POSITION_PCT of account
+        # for low-priced names with tight stops. Now we cap shares to the
+        # position ceiling and keep the un-capped original for context.
+        max_notional = ACCOUNT_SIZE * MAX_POSITION_PCT / 100
+        capped = notional_risk > max_notional
+        if capped and entry > 0:
+            shares = int(max_notional / entry)
+            notional = shares * entry
+        else:
+            shares = shares_risk
+            notional = notional_risk
         out["risk"] = {"entry": entry, "stop": stop, "risk_per_share": round(rps, 2),
                        "target": target, "target2": t2, "reward_risk": rr,
                        "rr_flag": rr_flag, "rr_to_t2": round((t2 - entry) / rps, 2) if (t2 and rps > 0) else None,
                        "notional": round(notional), "pct_of_account": round(100 * notional / ACCOUNT_SIZE, 1),
-                       "size_capped": notional > ACCOUNT_SIZE * MAX_POSITION_PCT / 100,
-                       "shares_at_risk_budget": shares, "measured_move": round(mm, 2),
+                       "size_capped": capped,
+                       "shares_at_risk_budget": shares,
+                       "shares_uncapped": shares_risk if capped else None,
+                       "measured_move": round(mm, 2),
                        "atr_bands": {"+1": round(entry + a, 2), "+2": round(entry + 2*a, 2),
                                      "-1": round(entry - a, 2), "-2": round(entry - 2*a, 2)}}
     return out
@@ -1587,10 +1845,12 @@ def fa_verdict(fa, close=None):
 
 # --------------------------------------------------------- market environment
 
-def market_env(hist, rotation):
-    """VIX baskets, oil complex, and short/inverse-ETF hedging gauge."""
+def market_env(hist, rotation, hy_oas=None):
+    """VIX basket, oil complex, HY OAS (credit veto MK07), short-ETF gauge."""
     def closes(s): return [b["c"] for b in hist[s]] if s in hist and hist[s] else None
     env = {}
+    if hy_oas:
+        env["hy_oas"] = hy_oas
     vix, v9, v3 = closes("^VIX"), closes("^VIX9D"), closes("^VIX3M")
     if vix:
         lvl = vix[-1]
@@ -1759,6 +2019,22 @@ def cmd_scan():
     breadth = round(len(above200) / len(scanned) * 100, 1) if scanned else 0
     regime_on = spy_closes[-1] > spy_s200 and spy_s200 > spy_s200p
     qqq = hist.get("QQQ"); qqq_closes = [b["c"] for b in qqq] if qqq else []
+    print("HY OAS (FRED credit-spread veto)...")
+    hy_oas = fetch_hy_oas()
+    if hy_oas is None:
+        print("  (no FRED key or fetch failed — risk-off tier will use VIX only)")
+    risk_off = compute_risk_off(vix_last, hy_oas)
+    if risk_off["tier"] != "NORMAL":
+        print(f"  {risk_off['banner']}")
+    regime_edge = current_regime_edge(
+        vix_last, hy_oas, spy_closes[-1] > spy_s200, spy_s200 > spy_s200p)
+    if regime_edge:
+        print(f"Regime edge: {regime_edge['bucket_label']} -> "
+              f"{regime_edge['edge_mult']}x baseline "
+              f"({regime_edge['mean_x21_pct']:+.2f}% mean fwd 21d, "
+              f"n={regime_edge['n']}, source={regime_edge['source']})")
+    else:
+        print("Regime lookup unavailable — run phaseC_regime_builder.py first.")
     market = {
         "spy_close": round(spy_closes[-1], 2),
         "spy_vs_200d_pct": round((spy_closes[-1] / spy_s200 - 1) * 100, 1),
@@ -1768,6 +2044,9 @@ def cmd_scan():
         "universe_breadth_above_200d_pct": breadth,
         "regime": "RISK_ON" if (regime_on and (vix_last or 0) < 28 and breadth > 40) else
                   ("CAUTION" if regime_on else "RISK_OFF"),
+        "risk_off": risk_off,
+        "hy_oas": hy_oas,
+        "regime_edge": regime_edge,
     }
 
     # RS percentile within today's universe (RS02)
@@ -1788,9 +2067,43 @@ def cmd_scan():
     def _rr_tier(r):
         f = (r.get("risk") or {}).get("rr_flag")
         return 2 if f == "POOR" else (1 if f == "BELOW_SPEC" else 0)
-    ranked = sorted((r for r in scanned if r.get("gates_passed") and r.get("setup") in actionable),
+    prelim = sorted((r for r in scanned if r.get("gates_passed") and r.get("setup") in actionable),
                     key=lambda r: (_rr_tier(r), -r["scores"]["composite"], actionable.index(r["setup"])))
+    # Sector cap: from Phase A walk-forward, Q5 concentrates into whichever
+    # sector rallied that quarter (sector-neutral variant gave ~2x Sharpe).
+    # Mark the 3rd+ name per sector as sector_capped and re-sort so capped
+    # names fall below un-capped equivalents. Keeps the primary ranking
+    # unchanged; top-N stops being "top 5 semis" by accident.
+    sec_counts = {}
+    for r in prelim:
+        sec = r.get("sector") or "Unknown"
+        sec_counts[sec] = sec_counts.get(sec, 0) + 1
+        rk = r.get("risk")
+        if rk is not None:                          # don't fabricate a risk dict
+            rk["sector_capped"] = sec_counts[sec] > SECTOR_MAX_POSITIONS
+    # Names without a risk block sort as sector_capped=False (they can't be
+    # sized anyway); real ranking uses the flag when present.
+    ranked = sorted(prelim,
+                    key=lambda r: ((r.get("risk") or {}).get("sector_capped", False),
+                                   _rr_tier(r), -r["scores"]["composite"],
+                                   actionable.index(r["setup"])))
     top3 = [r["ticker"] for r in ranked[:3]]
+    # PEAD names (post-earnings-announcement drift setups) get their own UI
+    # section — trade rules differ (short horizon, tight stops, no chasing).
+    # Ranked by composite because the hand-rolled PEAD sub-scorer failed its
+    # backtest (see backtest_pead.py) — composite orders these names better.
+    # Dedupe against top3 so a PEAD name already in the focus row doesn't
+    # render twice (day-2 audit UI-nit).
+    _top3_set = set(top3)
+    pead_ranked = [r["ticker"] for r in ranked
+                   if r.get("setup") == "POST_EVENT_DRIFT" and r["ticker"] not in _top3_set][:6]
+
+    # Portfolio-level risk-off: halve/zero every result's sizing via the
+    # shared helper. serve.lookup uses the same helper so searched names get
+    # the same treatment (pre-prod review CRIT-C1).
+    if risk_off["size_mult"] < 1.0:
+        for r in results.values():
+            apply_risk_off_to_result(r, risk_off)
 
     # options full (walls, GEX ladder, flow) for top ranked + watchlist + USO
     focus = list(dict.fromkeys([r["ticker"] for r in ranked[:8]] + [t for t, _ in watch]))[:OPTIONS_DEPTH]
@@ -1801,8 +2114,8 @@ def cmd_scan():
             optmap[s] = fetch_options_full(s, results[s]["close"])
     if "USO" in hist:
         optmap["USO"] = fetch_options_full("USO", hist["USO"][-1]["c"])
-    print("Market environment (VIX/oil/short-ETFs)...")
-    env = market_env(hist, rotation)
+    print("Market environment (VIX/oil/HY-OAS/short-ETFs)...")
+    env = market_env(hist, rotation, hy_oas=hy_oas)
     print(f"Fundamentals for {len(focus)} focus names...")
     fa_cache_p = os.path.join(DATA, "fa_cache.json")
     today_iso = datetime.date.today().isoformat()
@@ -1925,6 +2238,7 @@ def cmd_scan():
         "as_of": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
         "market": market, "rotation": rotation, "market_env": env, "freshness": freshness,
         "top3": top3, "ranked": [r["ticker"] for r in ranked[:25]],
+        "pead_ranked": pead_ranked,
         "changes": changes,
         "results": results, "options": optmap, "charts": charts,
         "watchlist": watch_report, "earnings_week": week,
@@ -1934,7 +2248,15 @@ def cmd_scan():
         "params": {"account": ACCOUNT_SIZE, "risk_budget_pct": RISK_BUDGET_PCT,
                    "earnings_blackout_days": EARNINGS_BLACKOUT_DAYS},
     }
-    json.dump(report, open(os.path.join(DATA, "report.json"), "w", encoding="utf-8"), indent=None)
+    # Atomic write (pre-prod wide-audit HIGH-P3): a serve.py lookup happening
+    # mid-write would previously read a partially-flushed report.json and
+    # crash. Write to .tmp then os.replace so readers always see a complete
+    # file. serve.py's persist path already uses this pattern.
+    _rp = os.path.join(DATA, "report.json")
+    _rp_tmp = _rp + ".tmp"
+    with open(_rp_tmp, "w", encoding="utf-8") as _f:
+        json.dump(report, _f, indent=None)
+    os.replace(_rp_tmp, _rp)
     print(f"Data: last bar {freshness['last_bar']} [{freshness['state']}]"
           + (f" — volume only {freshness['bar_volume_pct_of_median']}% of normal, bar still forming"
              if freshness["partial_bar"] else ""))
@@ -1950,6 +2272,10 @@ def cmd_lookup(tickers):
     hist, errors = fetch_all_history(list(tickers) + ["SPY"])
     spy_closes = [b["c"] for b in hist["SPY"]]
     emap, _, recent_map = fetch_earnings_map()
+    # Same risk-off state cmd_scan wrote; applied to each looked-up name so
+    # CLI lookups halve consistently with the batch scan (pre-prod wide-audit
+    # HIGH-P5; parallel to the serve.lookup fix for CRIT-C1).
+    risk_off = (report.get("market") or {}).get("risk_off")
     for s in tickers:
         s = s.upper()
         if s not in hist:
@@ -1959,6 +2285,8 @@ def cmd_lookup(tickers):
         report.setdefault("charts", {})[s] = chart_pack(hist[s])
         rot = rotation_for_sector(report["rotation"], r.get("sector"))
         r["rotation"] = rot
+        if risk_off:
+            apply_risk_off_to_result(r, risk_off)
         r["thesis"] = thesis_comment(r, rot, opts)
         r["plan"] = trade_plan(r, opts)
         fa = fetch_fa(s)
@@ -1971,7 +2299,13 @@ def cmd_lookup(tickers):
         report["results"][s] = r
         if opts: report["options"][s] = opts
         print(f"{s}: {r.get('setup')} | composite {r.get('scores',{}).get('composite')} | {r['thesis']['verdict']}")
-    json.dump(report, open(p, "w", encoding="utf-8"))
+    # Atomic write (pre-prod re-audit HIGH-P3b — same class as P3 in cmd_scan,
+    # missed on the first pass). serve.py concurrent read can't see a
+    # partially-flushed report.
+    _tmp = p + ".tmp"
+    with open(_tmp, "w", encoding="utf-8") as _f:
+        json.dump(report, _f)
+    os.replace(_tmp, p)
     cmd_html()
 
 def cmd_html():

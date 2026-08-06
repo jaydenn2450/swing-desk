@@ -17,6 +17,16 @@ body{background:var(--bg0);color:var(--t1);font-family:'Segoe UI',system-ui,sans
 .asof{font-size:11px;color:var(--t3)}
 .regime{padding:6px 16px;border-radius:8px;font-weight:800;font-size:13px;letter-spacing:1px}
 .RISK_ON{background:var(--grnG);color:var(--grn)}.CAUTION{background:var(--ylwG);color:var(--ylw)}.RISK_OFF{background:var(--redG);color:var(--red)}
+.riskoff{margin:14px 0;padding:12px 16px;border-radius:8px;border-left:4px solid var(--red);background:var(--redG);color:var(--red);font-family:Consolas,monospace;font-size:13px}
+.riskoff.HALF_SIZE{border-left-color:var(--ylw);background:var(--ylwG);color:var(--ylw)}
+.riskoff.NO_ADDS{border-left-color:var(--red);background:var(--redG);color:var(--red)}
+.riskoff-sub{margin-top:6px;font-size:11.5px;color:var(--t2);font-weight:400;letter-spacing:0}
+.zone.STRESS{background:var(--redG);color:var(--red)}.zone.WIDENING{background:var(--ylwG);color:var(--ylw)}.zone.CALM{background:var(--grnG);color:var(--grn)}
+.regimeedge{margin:10px 0;padding:10px 14px;border-radius:8px;border-left:4px solid var(--blu);background:var(--bluG);color:var(--blu);font-family:Consolas,monospace;font-size:12.5px}
+.regimeedge.strong{border-left-color:var(--grn);background:var(--grnG);color:var(--grn)}
+.regimeedge.weak{border-left-color:var(--red);background:var(--redG);color:var(--red)}
+.regimeedge.neutral{border-left-color:var(--blu);background:var(--bluG);color:var(--blu)}
+.regimeedge-sub{margin-top:4px;font-size:11px;color:var(--t2);font-weight:400}
 .tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
 .tab{padding:9px 20px;background:var(--bg2);border:1px solid var(--bd);border-radius:9px;font-size:12px;font-weight:800;letter-spacing:1px;color:var(--t2);cursor:pointer}
 .tab.on{background:var(--bluG);border-color:var(--blu);color:var(--blu)}
@@ -405,7 +415,7 @@ function bigCard(t,isFocus){
       <div class="kvi"><div class="kvl">Entry / pivot</div><div class="kvv mono">$${k.entry??'—'}</div></div>
       <div class="kvi"><div class="kvl">Stop</div><div class="kvv mono" style="color:var(--red)">$${k.stop??'—'}</div></div>
       <div class="kvi"><div class="kvl">T1 / T2 / R:R</div><div class="kvv mono" style="color:${k.rr_flag==='POOR'?'var(--red)':k.rr_flag==='BELOW_SPEC'?'var(--ylw)':'var(--t1)'}">$${k.target??'—'}${k.target2?' / $'+k.target2:''} · ${k.reward_risk??'—'}R${k.rr_flag==='POOR'?' ⚠':''}</div></div>
-      <div class="kvi"><div class="kvl">Size @ ${R.params.risk_budget_pct}% · Earnings</div><div class="kvv mono">${k.shares_at_risk_budget??'—'} sh${k.size_capped?' <span style="color:var(--ylw)">⚠</span>':''} · ${ed.date?ed.days+'d':(ed.status==='NONE_WITHIN_WINDOW'?'none '+(ed.checked_days||21)+'d':'—')}</div></div>
+      <div class="kvi"><div class="kvl">Size @ ${R.params.risk_budget_pct}% · Earnings</div><div class="kvv mono">${k.pct_of_account??'—'}% · ${k.shares_at_risk_budget??'—'} sh${k.size_mult!=null&&k.size_mult<1?` <span style="color:var(--ylw)" title="risk-off ${k.risk_off_tier} — was ${k.size_orig_pct}% / ${k.size_orig_shares} sh">◐ ${k.risk_off_tier==='NO_ADDS'?'NO ADD':'HALVED'}</span>`:''}${k.sector_capped?' <span style="color:var(--ylw)" title="3rd+ in sector — demoted by portfolio-level sector cap">↓ SEC CAP</span>':''}${k.size_capped?' <span style="color:var(--ylw)" title="notional would exceed MAX_POSITION_PCT — cap the shares">⚠ SIZE CAP</span>':''} · ${ed.date?ed.days+'d':(ed.status==='NONE_WITHIN_WINDOW'?'none '+(ed.checked_days||21)+'d':'—')}</div></div>
     </div>
     ${previewBlock(r)} ${planBlock(r)} ${optBlock(t)||optHint(t)} ${faBlock(t)} ${ibkrBlock(t)}
     <div class="ftr">
@@ -418,8 +428,9 @@ function bigCard(t,isFocus){
 }
 function rankRow(t,i){
   const r=R.results[t]; if(!r||!r.scores) return '';
-  const sc=r.scores, st=r.structure||{}, vol=r.volume||{}, ed=r.earnings||{};
-  return `<tr onclick="openDetail('${t}')"><td class="mono">${i+1}</td><td><b>${t}</b>${r.sector?` <span style="color:var(--t3);font-size:10px">${r.sector}</span>`:''}</td><td class="mono">$${r.close}</td>
+  const sc=r.scores, st=r.structure||{}, vol=r.volume||{}, ed=r.earnings||{}, k=r.risk||{};
+  const capBadge=k.sector_capped?` <span style="color:var(--ylw);font-size:9.5px" title="3rd+ in sector — demoted by sector cap">↓SC</span>`:'';
+  return `<tr onclick="openDetail('${t}')"><td class="mono">${i+1}</td><td><b>${t}</b>${capBadge}${r.sector?` <span style="color:var(--t3);font-size:10px">${r.sector}</span>`:''}</td><td class="mono">$${r.close}</td>
   <td><span class="setup ${r.setup}" style="float:none">${(r.setup||'').replace(/_/g,' ')}</span></td>
   <td class="mono">${(r.checklist||{}).score??'—'}/12</td>
   <td class="mono" style="color:${barColor(sc.composite)};font-weight:800">${sc.composite}</td>
@@ -500,6 +511,21 @@ function sparkSVG(xs,w,h,color){
 }
 function marketTab(){
   const env=R.market_env||{}; let out='<div class="envgrid">';
+  const h=env.hy_oas;
+  if(h){
+    const wide=h.above_60d_hi||h.at_1y_hi||h.delta_20d_bps>=40;
+    const zone=h.at_1y_hi?'STRESS':h.above_60d_hi?'WIDENING':h.delta_20d_bps>=40?'WIDENING':h.pctile_1y<=15?'CALM':'NORMAL';
+    out+=`<div class="env"><h3>💳 HY CREDIT SPREAD <span class="zone ${zone}">${zone}</span></h3>
+      <div class="envkv">
+        <div class="kvi"><div class="kvl">OAS (bps)</div><div class="kvv mono" style="color:${wide?'var(--red)':'var(--grn)'}">${h.level_bps}</div></div>
+        <div class="kvi"><div class="kvl">60d high</div><div class="kvv mono">${h.hi_60d_bps}</div></div>
+        <div class="kvi"><div class="kvl">1y high</div><div class="kvv mono">${h.hi_1y_bps}</div></div>
+        <div class="kvi"><div class="kvl">20d chg</div><div class="kvv mono" style="color:${h.delta_20d_bps>0?'var(--red)':'var(--grn)'}">${h.delta_20d_bps>0?'+':''}${h.delta_20d_bps}bps</div></div>
+        <div class="kvi"><div class="kvl">1y %ile</div><div class="kvv mono">${h.pctile_1y}</div></div>
+      </div>
+      ${sparkSVG(h.spark,380,54,wide?'#ef4444':'#10b981')}
+      <div class="envc">${h.read}<br><span style="color:var(--t3)">Series: FRED ${h.series} · last obs ${h.last_obs}. HY OAS = compensation credit markets demand for default risk; historically leads equity drawdowns better than VIX.</span></div></div>`;
+  }
   const v=env.vix;
   if(v) out+=`<div class="env"><h3>😱 VIX BASKET <span class="zone ${v.zone}">${v.zone}</span></h3>
     <div class="envkv">
@@ -768,6 +794,8 @@ ${IS_FILE?`<div style="padding:11px 16px;margin-bottom:12px;border-radius:10px;b
   <div class="tab" id="tab-flow" onclick="setTab('flow')">🌊 FLOW & GEX</div>
 </div>
 <div id="view-desk">
+  ${(M.risk_off&&M.risk_off.banner)?`<div class="riskoff ${M.risk_off.tier}"><b>${M.risk_off.tier==='NO_ADDS'?'⛔':'⚠'} ${M.risk_off.banner}</b><div class="riskoff-sub">Sizing on every card ${M.risk_off.tier==='NO_ADDS'?'zeroed':'halved'} automatically. See MARKET ENV → HY CREDIT SPREAD for the trigger detail.</div></div>`:''}
+  ${M.regime_edge?(()=>{const re=M.regime_edge;const strong=re.edge_mult>=1.3;const weak=re.edge_mult<0.7||(re.mean_x21_pct||0)<0;const cls=strong?'strong':weak?'weak':'neutral';return `<div class="regimeedge ${cls}"><b>🎯 REGIME: ${re.bucket_label}</b> — ${re.edge_mult}× baseline · ${re.mean_x21_pct>=0?'+':''}${re.mean_x21_pct}% mean fwd 21d Q5 · hit ${re.hit_pct}% · n=${re.n}${re.source==='marginal_blend'?' (marginal blend, thin 3-D cell)':''}<div class="regimeedge-sub">${re.read}</div></div>`;})():''}
   <div class="searchrow">
     <input id="search" placeholder="Search ticker… (Enter → full signal card)" onkeydown="doSearch(event)">
     <div class="hint">Any ticker — in the scan or not — is analyzed live on Enter: thesis, checklist, plan, options intel, fundamentals. 📈 CHART opens the interactive chart in its own tab.</div>
@@ -787,6 +815,8 @@ ${IS_FILE?`<div style="padding:11px 16px;margin-bottom:12px;border-radius:10px;b
   <div id="rotwrap">${rotationSection()}</div>
   <div class="sec">🎯 Top 3 Focus Ideas — 📈 opens the chart in a new tab</div>
   <div class="top3">${R.top3.map(t=>bigCard(t,true)).join('')||'<div class="empty">No names passed all gates today.</div>'}</div>
+  ${(R.pead_ranked||[]).length?`<div class="sec">📊 PEAD Setups — post-earnings drift names (different trade rules: shorter horizon, tighter stops, gap-fill is invalidation)</div>
+  <div class="top3">${R.pead_ranked.map(t=>bigCard(t,false)).join('')}</div>`:''}
   <div class="sec">⚡ Signal Scans — click a name for its full card</div>
   <div class="sigbrowser">${signalBrowser()}</div>
   <div class="sec">📊 Ranked Scan — click a row for the full card</div>
